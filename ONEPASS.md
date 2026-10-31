@@ -11,7 +11,7 @@ The exported image path is:
 ```
 Rockstar Editor native one-frame bake
   -> game GPU/postprocessing color buffer
-  -> one genuine IDXGISwapChain::Present(0,0) (ReShade sees it)
+  -> EVER's two genuine IDXGISwapChain::Present(1,0) callbacks (ReShade/ENB compatibility)
   -> GPU backbuffer -> D3D11 staging texture
   -> map exactly one frame
   -> EVER EncoderSession::enqueueVideoFrame
@@ -24,7 +24,7 @@ Rockstar Editor native one-frame bake
 - **No motion_blur_samples or motion_blur_strength** in the config schema.
 - No `PSAccumulate.hlsl`, `PSDivide.hlsl`, or `VSFullScreen.hlsl`.
 - No `drawAdditive`, `divideBuffer`, or accumulation target allocation.
-- Exactly one real `Present(0,0)` for each export capture, instead of two.
+- Preserved upstream EVER's two real `Present(1,0)` callbacks for ReShade and ENB compatibility. These do **not** re-render the GTA scene or generate extra samples.
 - GPU backbuffer copied to staging directly, mapped once and queued to the
   existing asynchronous video encoder. The output color format is selected
   from the actual DXGI swapchain format: BGRA maps to `bgra`, RGBA to
@@ -68,8 +68,8 @@ video/encoding hooks and can conflict.
 ## What this does not solve yet
 
 - This is not a verified final **post-ReShade** video capture. Upstream
-  EVER uses its swapchain Present hook to run ReShade; reducing to one
-  genuine Present should execute the same hook but must be verified
+  EVER uses its swapchain Present hook to run ReShade; retaining its two
+  genuine Presents should execute the same hooks but must be verified
   visually on FiveM 3788. Some flip-model configurations may require
   capturing before the buffer rotates.
 - GTA's timecycle `postfx_motionblurlength` can be enabled with the

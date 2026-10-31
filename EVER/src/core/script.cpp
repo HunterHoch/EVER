@@ -242,26 +242,6 @@ namespace {
     void schedulePass2StartupOnMainThread(const char* reason);
     bool executePass2StartupOnMainThread();
 
-    struct TemporalSyncState {
-        double ripplesAccumulatorSec = 0.0;
-        uint64_t ripplesCalls = 0;
-        uint64_t ripplesSkipped = 0;
-        double clothAccumulatorSec = 0.0;
-        uint64_t clothCalls = 0;
-        uint64_t clothSkipped = 0;
-        bool wasExportActive = false;
-    };
-
-    std::mutex g_temporalSyncMutex;
-    TemporalSyncState g_temporalSyncState;
-    std::atomic_bool g_loggedRipplesExportHit = false;
-    std::atomic_bool g_loggedClothExportHit = false;
-    // Pointer to rage::fwTimer::sm_systemTime.m_StepInSeconds
-    float* g_pClothSystemTimeStep = nullptr;
-
-    constexpr double kTemporalSyncTargetStepSec = 1.0 / 30.0;
-    constexpr double kTemporalSyncMaxAccumulatorSec = 0.25;
-
     bool bindExportSwapChainIfAvailableLocked() {
         if (!exportContext) {
             return false;
@@ -635,59 +615,6 @@ namespace {
             LOG(LL_NFO, "Forced ms_bWantDelayedClose=false during dual-pass transition. reason=", reason,
                 " state=", dualPassContext ? dualPassStateName(dualPassContext->state) : "NO_CONTEXT");
         }
-    }
-
-    double getCurrentExportRenderStepSeconds() {
-        const auto fps = Config::Manager::fps;
-        // One engine update per output frame, no subframe multiplier.
-        const float denominator = static_cast<float>(fps.first);
-
-        if (denominator <= 0.0f) {
-            return kTemporalSyncTargetStepSec;
-        }
-
-        const float milliseconds = 1000.0f * static_cast<float>(fps.second) / denominator;
-        return std::max(0.0001, static_cast<double>(milliseconds) / 1000.0);
-    }
-
-    bool shouldExecuteTemporalTick(double& accumulatorSec, const double deltaSec) {
-        accumulatorSec = std::min(accumulatorSec + deltaSec, kTemporalSyncMaxAccumulatorSec);
-        if (accumulatorSec + 1e-9 < kTemporalSyncTargetStepSec) {
-            return false;
-        }
-
-        accumulatorSec = std::fmod(accumulatorSec, kTemporalSyncTargetStepSec);
-        return true;
-    }
-
-    void resetTemporalSyncStateLocked() {
-        g_temporalSyncState.ripplesAccumulatorSec = 0.0;
-        g_temporalSyncState.ripplesCalls = 0;
-        g_temporalSyncState.ripplesSkipped = 0;
-        g_temporalSyncState.clothAccumulatorSec = 0.0;
-        g_temporalSyncState.clothCalls = 0;
-        g_temporalSyncState.clothSkipped = 0;
-    }
-
-    void updateTemporalSyncExportTransitionLocked(const bool exportActive) {
-        if (g_temporalSyncState.wasExportActive == exportActive) {
-            return;
-        }
-
-        g_temporalSyncState.wasExportActive = exportActive;
-        resetTemporalSyncStateLocked();
-        LOG(LL_NFO, "Temporal sync state transition: exportActive=", exportActive);
-    }
-
-    void logTemporalSyncCounters(const char* label, const uint64_t calls, const uint64_t skipped, const double stepSec) {
-        if (calls == 0 || (calls % 240) != 0) {
-            return;
-        }
-
-        LOG(LL_DBG, "Temporal sync ", label,
-            " calls=", calls,
-            " skipped=", skipped,
-            " stepMs=", static_cast<float>(stepSec * 1000.0));
     }
 
     void resolveWantDelayedCloseAddress(const uint64_t setUserConfirmationAddress) {
@@ -1807,62 +1734,6 @@ void ever::initialize() {
                 LOG(LL_WRN, "Could not find ShouldShowLoadingScreen function.");
             }
 
-            if (pPuddlesRipplesUpdate) {
-                const bool oldEntry = memoryStartsWith(
-                    pPuddlesRipplesUpdate,
-                    {0x40, 0x53, 0x48, 0x83, 0xEC, 0x60, 0x48, 0x8B, 0xD9});
-                const bool b3751Entry = memoryStartsWith(
-                    pPuddlesRipplesUpdate,
-                    {0x48, 0x40, 0x53, 0x48, 0x83, 0xEC, 0x60, 0x8A, 0x05});
-                const bool b3751AltEntry = memoryStartsWith(
-                    pPuddlesRipplesUpdate,
-                    {0x53, 0x48, 0x83, 0xEC, 0x60, 0x8A, 0x05});
-
-                if (!oldEntry && !b3751Entry && !b3751AltEntry) {
-                    LOG(LL_WRN, "Skipping PuddlesRipplesUpdate hook: resolved address is not function entry");
-                } else {
-                    PERFORM_X64_HOOK_WITH_SCHEME_REQUIRED(PuddlesRipplesUpdate, pPuddlesRipplesUpdate,
-                                                            PLH::x64Detour::detour_scheme_t::INPLACE);
-                    LOG(LL_NFO, "PuddlesRipplesUpdate hook installed. trampoline:",
-                        reinterpret_cast<void*>(GameHooks::PuddlesRipplesUpdate::OriginalFunc));
-                }
-            } else {
-                LOG(LL_WRN, "Could not find PuddlesRipplesUpdate function.");
-            }
-
-            if (pClothManagerUpdate) {
-                const bool isExpectedEntry = memoryStartsWith(
-                    pClothManagerUpdate,
-                    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10});
-
-                if (!isExpectedEntry) {
-                    LOG(LL_WRN, "Skipping ClothManagerUpdate hook: resolved address does not match expected prologue");
-                    LOG(LL_WRN, "Flag/cloth wind simulation will NOT be corrected during video export.");
-                } else {
-                    const uint8_t* pInstr = reinterpret_cast<const uint8_t*>(pClothManagerUpdate) + 0x10F;
-                    if (pInstr[0] == 0xF3 && pInstr[1] == 0x0F && pInstr[2] == 0x10 && pInstr[3] == 0x05) {
-                        int32_t disp32 = 0;
-                        std::memcpy(&disp32, pInstr + 4, sizeof(disp32));
-                        g_pClothSystemTimeStep = reinterpret_cast<float*>(
-                            reinterpret_cast<uintptr_t>(pInstr) + 8 + disp32);
-                        LOG(LL_NFO, "sm_systemTime.m_StepInSeconds resolved at ",
-                            Logger::hex(reinterpret_cast<uint64_t>(g_pClothSystemTimeStep), 16));
-                    } else {
-                        LOG(LL_WRN, "ClothManagerUpdate: could not find sm_systemTime movss at expected offset.",
-                            " Bytes: ", Logger::hex(pInstr[0],2), " ", Logger::hex(pInstr[1],2),
-                            " ", Logger::hex(pInstr[2],2), " ", Logger::hex(pInstr[3],2));
-                    }
-                    PERFORM_X64_HOOK_WITH_SCHEME_REQUIRED(ClothManagerUpdate, pClothManagerUpdate,
-                                                          PLH::x64Detour::detour_scheme_t::INPLACE);
-                    LOG(LL_NFO, "ClothManagerUpdate hook installed. trampoline:",
-                        reinterpret_cast<void*>(GameHooks::ClothManagerUpdate::OriginalFunc));
-                    LOG(LL_DBG, "ClothManagerUpdate: will patch sm_systemTime.m_StepInSeconds to export sub-frame step during export");
-                }
-            } else {
-                LOG(LL_WRN, "Could not find ClothManagerUpdate function.");
-                LOG(LL_WRN, "Flag/cloth wind simulation may run too fast during video export.");
-            }
-            
             if (Config::Manager::disable_watermark) {
                 PERFORM_SINGLE_BYTE_PATCH(pWatermarkRenderer, 0xC3, "Watermark renderer");
             } else {
@@ -2979,79 +2850,6 @@ bool GameHooks::ShouldShowLoadingScreen::Implementation() {
 
     POST();
     return originalResult;
-}
-
-void GameHooks::PuddlesRipplesUpdate::Implementation(void* ripples, float rainyness) {
-    PRE();
-
-    const bool exportActive = ever::isExportActive();
-    if (!exportActive) {
-        {
-            std::lock_guard<std::mutex> lock(g_temporalSyncMutex);
-            updateTemporalSyncExportTransitionLocked(false);
-        }
-        OriginalFunc(ripples, rainyness);
-        POST();
-        return;
-    }
-
-    if (!g_loggedRipplesExportHit.exchange(true)) {
-        LOG(LL_NFO, "PuddlesRipplesUpdate hit during export. ripples=",
-            Logger::hex(reinterpret_cast<uint64_t>(ripples), 16),
-            " rainyness=", rainyness);
-    }
-
-    const double stepSec = getCurrentExportRenderStepSeconds();
-    bool shouldRun = true;
-    uint64_t calls = 0;
-    uint64_t skipped = 0;
-
-    {
-        std::lock_guard<std::mutex> lock(g_temporalSyncMutex);
-        updateTemporalSyncExportTransitionLocked(true);
-
-        ++g_temporalSyncState.ripplesCalls;
-        shouldRun = shouldExecuteTemporalTick(g_temporalSyncState.ripplesAccumulatorSec, stepSec);
-        if (!shouldRun) {
-            ++g_temporalSyncState.ripplesSkipped;
-        }
-
-        calls = g_temporalSyncState.ripplesCalls;
-        skipped = g_temporalSyncState.ripplesSkipped;
-        logTemporalSyncCounters("ripples", calls, skipped, stepSec);
-    }
-
-    if (!shouldRun) {
-        POST();
-        return;
-    }
-
-    OriginalFunc(ripples, rainyness);
-    POST();
-}
-
-void GameHooks::ClothManagerUpdate::Implementation(void* thisPtr, int typeToUpdate) {
-    PRE();
-
-    if (!ever::isExportActive() || !g_pClothSystemTimeStep) {
-        OriginalFunc(thisPtr, typeToUpdate);
-        POST();
-        return;
-    }
-
-    const float exportStep = static_cast<float>(getCurrentExportRenderStepSeconds());
-    const float savedSystemStep = *g_pClothSystemTimeStep;
-    *g_pClothSystemTimeStep = exportStep;
-
-    if (!g_loggedClothExportHit.exchange(true)) {
-        LOG(LL_NFO, "ClothManagerUpdate: patching sm_systemTime.m_StepInSeconds ",
-            savedSystemStep * 1000.0f, "ms -> ", exportStep * 1000.0f, "ms",
-            " typeToUpdate=", typeToUpdate);
-    }
-
-    OriginalFunc(thisPtr, typeToUpdate);
-    *g_pClothSystemTimeStep = savedSystemStep;
-    POST();
 }
 
 float GameHooks::GetRenderTimeBase::Implementation(int64_t choice) {

@@ -1967,9 +1967,14 @@ void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceCo
                                                              reinterpret_cast<void**>(pSwapChainBuffer.GetAddressOf())),
                     "Failed to get swap chain's buffer");
 
-            // Native EVER one-pass export. Keep the real ReShade Present hook,
-            // but never draw an accumulation pass or re-render a subframe.
-            const HRESULT presentHr = ::exportContext->p_swap_chain->Present(0, 0);
+            // One WORLD render and one ENCODED frame, with no sampled images.
+            // Keep EVER's TWO real Present() callbacks exactly as upstream:
+            // they're a ReShade/ENB compatibility quirk, NOT additional scene
+            // renders or temporal samples. We can optimize to one after visual
+            // verification, but dropping either before testing is risky.
+            const HRESULT present1 = ::exportContext->p_swap_chain->Present(1, 0);
+            const HRESULT present2 = ::exportContext->p_swap_chain->Present(1, 0);
+            const HRESULT presentHr = FAILED(present1) ? present1 : present2;
             if (FAILED(presentHr)) {
                 LOG(LL_ERR, "One-pass Present failed HRESULT=", Logger::hex(
                     static_cast<uint32_t>(presentHr), 8));

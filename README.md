@@ -4,8 +4,9 @@
 
 **Branch:** `feature/native-onepass` for direct ReShade-aware DX11 capture with
 **exactly one native Rockstar Editor frame per encoded frame**. All
-`motion_blur_samples` logic, accumulation and divide HLSL shaders, double
-`Present`, and sampling-era ripple/cloth time gating are removed.
+`motion_blur_samples` logic, accumulation and divide HLSL shaders, sampling-era ripple/cloth time gating are removed. EVER's two real
+ReShade/ENB `Present` callbacks are **retained**, since they are not
+additional scene renders or accumulated samples.
 
 The original EVER FFmpeg/LibAV codec and audio pipeline are preserved, as
 are its render target recognition and native Rockstar Editor export hooks.

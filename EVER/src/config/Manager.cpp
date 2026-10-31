@@ -17,8 +17,6 @@ namespace Config {
     string Manager::output_dir;
     LogLevel Manager::log_level;
     pair<uint32_t, uint32_t> Manager::fps;
-    uint8_t Manager::motion_blur_samples;
-    float Manager::motion_blur_strength;
     bool Manager::export_openexr;
     bool Manager::disable_watermark;
     FFmpeg::FFENCODERCONFIG Manager::encoder_config;
@@ -43,8 +41,6 @@ namespace Config {
         output_dir = reader.getOutputDirectory("", CFG_OUTPUT_DIR);
         log_level = reader.readLogLevel("", CFG_LOG_LEVEL, LL_ERR);
         fps = reader.readFraction(CFG_EXPORT_SECTION, CFG_EXPORT_FPS, {30000, 1001});
-        motion_blur_samples = reader.readInt<uint8_t>(CFG_EXPORT_SECTION, CFG_EXPORT_MB_SAMPLES, 0, 0, 255);
-        motion_blur_strength = reader.readFloat(CFG_EXPORT_SECTION, CFG_EXPORT_MB_STRENGTH, 0.5f, 0.0f, 1.0f);
         export_openexr = reader.readBool(CFG_EXPORT_SECTION, CFG_EXPORT_OPENEXR, false);
         disable_watermark = reader.readBool(CFG_EXPORT_SECTION, CFG_DISABLE_WATERMARK, false);
         
@@ -77,9 +73,7 @@ namespace Config {
                 file << "fps = " << fps.first << "/" << fps.second << "\n";
             }
             
-            file << "motion_blur_samples = " << static_cast<int>(motion_blur_samples) << "\n"
-                << "motion_blur_strength = " << motion_blur_strength << "\n"
-                << "export_openexr = " << (export_openexr ? "true" : "false") << "\n"
+            file << "export_openexr = " << (export_openexr ? "true" : "false") << "\n"
                 << "disable_watermark = " << (disable_watermark ? "true" : "false") << "\n";
             
             LOG(LL_NFO, "Saved configuration");

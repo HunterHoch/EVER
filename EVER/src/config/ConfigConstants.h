@@ -12,8 +12,6 @@
 
 // Export section
 #define CFG_EXPORT_SECTION "EXPORT"
-#define CFG_EXPORT_MB_SAMPLES "motion_blur_samples"
-#define CFG_EXPORT_MB_STRENGTH "motion_blur_strength"
 #define CFG_EXPORT_FPS "fps"
 #define CFG_EXPORT_OPENEXR "export_openexr"
 #define CFG_DISABLE_WATERMARK "disable_watermark"

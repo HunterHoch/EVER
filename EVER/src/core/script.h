@@ -31,9 +31,4 @@ using namespace Microsoft::WRL;
     void OnPresent(IDXGISwapChain* p_swap_chain);
     void finalize();
     bool isExportActive();
-    static void prepareDeferredContext(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext);
-    static ComPtr<ID3D11Texture2D> divideBuffer(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext,
-                                                uint32_t k);
-    static void drawAdditive(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext,
-                            ComPtr<ID3D11Texture2D> pSource);
 }

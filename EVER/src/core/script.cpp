@@ -31,18 +31,6 @@
 #include <vector>
 #include <variant>
 
-namespace PSAccumulate {
-#include <PSAccumulate.h>
-}
-
-namespace PSDivide {
-#include <PSDivide.h>
-}
-
-namespace VSFullScreen {
-#include <VSFullScreen.h>
-}
-
 using namespace Microsoft::WRL;
 using namespace DirectX;
 
@@ -66,21 +54,6 @@ namespace {
     std::thread::id mainThreadId;
     ComPtr<IDXGISwapChain> mainSwapChain;
     ComPtr<IDXGIFactory> pDxgiFactory;
-    ComPtr<ID3D11DeviceContext> pDContext;
-    ComPtr<ID3D11Texture2D> pMotionBlurAccBuffer;
-    ComPtr<ID3D11Texture2D> pMotionBlurFinalBuffer;
-    ComPtr<ID3D11VertexShader> pVsFullScreen;
-    ComPtr<ID3D11PixelShader> pPsAccumulate;
-    ComPtr<ID3D11PixelShader> pPsDivide;
-    ComPtr<ID3D11Buffer> pDivideConstantBuffer;
-    ComPtr<ID3D11RasterizerState> pRasterState;
-    ComPtr<ID3D11SamplerState> pPsSampler;
-    ComPtr<ID3D11RenderTargetView> pRtvAccBuffer;
-    ComPtr<ID3D11RenderTargetView> pRtvBlurBuffer;
-    ComPtr<ID3D11ShaderResourceView> pSrvAccBuffer;
-    ComPtr<ID3D11Texture2D> pSourceSrvTexture;
-    ComPtr<ID3D11ShaderResourceView> pSourceSrv;
-    ComPtr<ID3D11BlendState> pAccBlendState;
     std::mutex d3d11HookMutex;
     bool isD3D11HookInstalled = false;
     thread_local bool isInstallingD3D11Hook = false;
@@ -167,8 +140,6 @@ namespace {
         ComPtr<ID3D11Device> p_device;
         ComPtr<IDXGISwapChain> p_swap_chain;
         ComPtr<IMFMediaType> video_media_type;
-        int acc_count = 0;
-        int total_frame_num = 0;
     };
 
     std::unique_ptr<ExportContext> exportContext;
@@ -189,7 +160,6 @@ namespace {
         void* saved_montage_ptr = nullptr;
         
         std::pair<int32_t, int32_t> original_fps;
-        int32_t original_motion_blur_samples = 0;
         
         std::string timestamp;
         std::string final_output_file;
@@ -669,8 +639,8 @@ namespace {
 
     double getCurrentExportRenderStepSeconds() {
         const auto fps = Config::Manager::fps;
-        const float sampleCount = static_cast<float>(Config::Manager::motion_blur_samples) + 1.0f;
-        const float denominator = static_cast<float>(fps.first) * sampleCount;
+        // One engine update per output frame, no subframe multiplier.
+        const float denominator = static_cast<float>(fps.first);
 
         if (denominator <= 0.0f) {
             return kTemporalSyncTargetStepSec;
@@ -1338,10 +1308,8 @@ namespace {
         LOG(LL_NFO, "Starting Pass 2 (Video Export)");
         dualPassContext->state = DualPassState::PASS2_PENDING;
         Config::Manager::fps = dualPassContext->original_fps;
-        Config::Manager::motion_blur_samples = dualPassContext->original_motion_blur_samples;
 
         LOG(LL_DBG, "  Restoring FPS: ", Config::Manager::fps.first, "/", Config::Manager::fps.second);
-        LOG(LL_DBG, "  Motion blur: ", Config::Manager::motion_blur_samples);
         LOG(LL_DBG, "  Video editor interface ptr: ", reinterpret_cast<void*>(dualPassContext->saved_video_editor_interface));
         LOG(LL_DBG, "  Montage ptr: ", reinterpret_cast<void*>(dualPassContext->saved_montage_ptr));
         LOG(LL_DBG, "  Audio buffer size: ", dualPassContext->audio_buffer.size(), " bytes");
@@ -1465,7 +1433,6 @@ HRESULT ExportHooks::D3D11CreateDeviceAndSwapChain::Implementation(
                     "Failed to get IDXGIFactory");
             installFactoryHooks(localFactory.Get());
 
-            ever::prepareDeferredContext(*pp_device, *pp_immediate_context);
         } catch (std::exception& ex) {
             LOG(LL_ERR, ex.what());
         } catch (...) {
@@ -2129,48 +2096,45 @@ void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceCo
                                                              reinterpret_cast<void**>(pSwapChainBuffer.GetAddressOf())),
                     "Failed to get swap chain's buffer");
 
-            LOG_CALL(LL_DBG,
-                     ::exportContext->p_swap_chain->Present(1, 0)); // IMPORTANT: This call makes ENB and ReShade
-                                                                    // effects to be applied to the render target
-
-            LOG_CALL(LL_DBG,
-                     ::exportContext->p_swap_chain->Present(1, 0)); // IMPORTANT: This call makes ENB and ReShade
-                                                                    // effects to be applied to the render target
-
-            if (Config::Manager::motion_blur_samples != 0) {
-                const float current_shutter_position =
-                    (::exportContext->total_frame_num % (Config::Manager::motion_blur_samples + 1)) /
-                    static_cast<float>(Config::Manager::motion_blur_samples);
-
-                if (current_shutter_position >= (1 - Config::Manager::motion_blur_strength)) {
-                    ever::drawAdditive(pDevice, p_this, pSwapChainBuffer);
-                }
+            // Native EVER one-pass export. Keep the real ReShade Present hook,
+            // but never draw an accumulation pass or re-render a subframe.
+            const HRESULT presentHr = ::exportContext->p_swap_chain->Present(0, 0);
+            if (FAILED(presentHr)) {
+                LOG(LL_ERR, "One-pass Present failed HRESULT=", Logger::hex(
+                    static_cast<uint32_t>(presentHr), 8));
             } else {
-                // Trick to use the same buffers for when not using motion blur
-                ::exportContext->acc_count = 0;
-                ever::drawAdditive(pDevice, p_this, pSwapChainBuffer);
-                ::exportContext->acc_count = 1;
-                ::exportContext->total_frame_num = 1;
-            }
-
-            if ((::exportContext->total_frame_num % (::Config::Manager::motion_blur_samples + 1)) ==
-                Config::Manager::motion_blur_samples) {
-
-                const ComPtr<ID3D11Texture2D> result = ever::divideBuffer(pDevice, p_this, ::exportContext->acc_count);
-                ::exportContext->acc_count = 0;
-
-                D3D11_MAPPED_SUBRESOURCE mapped;
-
-                REQUIRE(p_this->Map(result.Get(), 0, D3D11_MAP_READ, 0, &mapped), "Failed to capture swapbuffer.");
-                {
-                    std::lock_guard sessionLock(mxSession);
-                    if ((encodingSession != nullptr) && (encodingSession->isCapturing)) {
-                        REQUIRE(encodingSession->enqueueVideoFrame(mapped), "Failed to enqueue frame.");
+                D3D11_TEXTURE2D_DESC d{};
+                pSwapChainBuffer->GetDesc(&d);
+                const bool supported = d.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                                       d.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+                                       d.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
+                                       d.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+                if (!supported || d.SampleDesc.Count != 1) {
+                    LOG(LL_ERR, "One-pass frame format unsupported: ",
+                        static_cast<unsigned>(d.Format));
+                } else {
+                    D3D11_TEXTURE2D_DESC stageDesc=d;
+                    stageDesc.Usage=D3D11_USAGE_STAGING;
+                    stageDesc.BindFlags=0;
+                    stageDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                    stageDesc.MiscFlags=0;
+                    ComPtr<ID3D11Texture2D> stage;
+                    REQUIRE(pDevice->CreateTexture2D(&stageDesc,nullptr,stage.GetAddressOf()),
+                            "Cannot allocate one-pass staging texture");
+                    // The same GPU image that EVER uses after its ReShade Present.
+                    p_this->CopyResource(stage.Get(),pSwapChainBuffer.Get());
+                    D3D11_MAPPED_SUBRESOURCE mapped{};
+                    REQUIRE(p_this->Map(stage.Get(),0,D3D11_MAP_READ,0,&mapped),
+                            "Cannot map one-pass GPU image");
+                    {
+                        std::lock_guard sessionLock(mxSession);
+                        if (encodingSession && encodingSession->isCapturing)
+                            REQUIRE(encodingSession->enqueueVideoFrame(mapped),
+                                    "Failed to enqueue one-pass frame");
                     }
+                    p_this->Unmap(stage.Get(),0);
                 }
-                p_this->Unmap(result.Get(), 0);
             }
-            ::exportContext->total_frame_num++;
                 } catch (std::exception&) {
                     LOG(LL_ERR, "Reading video frame from D3D Device failed.");
                     LOG_CALL(LL_DBG, encodingSession.reset());
@@ -2211,81 +2175,6 @@ HRESULT IMFSinkWriterHooks::AddStream::Implementation(IMFSinkWriter* pThis, IMFM
     return OriginalFunc(pThis, pTargetMediaType, pdwStreamIndex);
 }
 
-void CreateMotionBlurBuffers(ComPtr<ID3D11Device> p_device, D3D11_TEXTURE2D_DESC const& desc) {
-    D3D11_TEXTURE2D_DESC accBufDesc = desc;
-    accBufDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    accBufDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    accBufDesc.CPUAccessFlags = 0;
-    accBufDesc.MiscFlags = 0;
-    accBufDesc.Usage = D3D11_USAGE::D3D11_USAGE_DEFAULT;
-    accBufDesc.MipLevels = 1;
-    accBufDesc.ArraySize = 1;
-    accBufDesc.SampleDesc.Count = 1;
-    accBufDesc.SampleDesc.Quality = 0;
-
-    LOG_IF_FAILED(p_device->CreateTexture2D(&accBufDesc, NULL, pMotionBlurAccBuffer.ReleaseAndGetAddressOf()),
-                  "Failed to create accumulation buffer texture");
-
-    D3D11_TEXTURE2D_DESC mbBufferDesc = accBufDesc;
-    mbBufferDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
-    mbBufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-
-    LOG_IF_FAILED(p_device->CreateTexture2D(&mbBufferDesc, NULL, pMotionBlurFinalBuffer.ReleaseAndGetAddressOf()),
-                  "Failed to create motion blur buffer texture");
-
-    D3D11_RENDER_TARGET_VIEW_DESC accBufRTVDesc;
-    accBufRTVDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-    accBufRTVDesc.Texture2D.MipSlice = 0;
-    accBufRTVDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-
-    LOG_IF_FAILED(p_device->CreateRenderTargetView(pMotionBlurAccBuffer.Get(), &accBufRTVDesc,
-                                                   pRtvAccBuffer.ReleaseAndGetAddressOf()),
-                  "Failed to create acc buffer RTV.");
-
-    D3D11_RENDER_TARGET_VIEW_DESC mbBufferRTVDesc;
-    mbBufferRTVDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-    mbBufferRTVDesc.Texture2D.MipSlice = 0;
-    mbBufferRTVDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-
-    LOG_IF_FAILED(p_device->CreateRenderTargetView(pMotionBlurFinalBuffer.Get(), &mbBufferRTVDesc,
-                                                   pRtvBlurBuffer.ReleaseAndGetAddressOf()),
-                  "Failed to create blur buffer RTV.");
-
-    D3D11_SHADER_RESOURCE_VIEW_DESC accBufSRVDesc;
-    accBufSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    accBufSRVDesc.Texture2D.MipLevels = 1;
-    accBufSRVDesc.Texture2D.MostDetailedMip = 0;
-    accBufSRVDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-
-    LOG_IF_FAILED(p_device->CreateShaderResourceView(pMotionBlurAccBuffer.Get(), &accBufSRVDesc,
-                                                     pSrvAccBuffer.ReleaseAndGetAddressOf()),
-                  "Failed to create blur buffer SRV.");
-
-    D3D11_TEXTURE2D_DESC sourceSRVTextureDesc = desc;
-    sourceSRVTextureDesc.CPUAccessFlags = 0;
-    sourceSRVTextureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    sourceSRVTextureDesc.MiscFlags = 0;
-    sourceSRVTextureDesc.Usage = D3D11_USAGE::D3D11_USAGE_DEFAULT;
-    sourceSRVTextureDesc.ArraySize = 1;
-    sourceSRVTextureDesc.SampleDesc.Count = 1;
-    sourceSRVTextureDesc.SampleDesc.Quality = 0;
-    sourceSRVTextureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    sourceSRVTextureDesc.MipLevels = 1;
-
-    REQUIRE(p_device->CreateTexture2D(&sourceSRVTextureDesc, NULL, pSourceSrvTexture.ReleaseAndGetAddressOf()),
-            "Failed to create back buffer copy texture");
-
-    D3D11_SHADER_RESOURCE_VIEW_DESC sourceSRVDesc;
-    sourceSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    sourceSRVDesc.Texture2D.MipLevels = 1;
-    sourceSRVDesc.Texture2D.MostDetailedMip = 0;
-    sourceSRVDesc.Format = sourceSRVTextureDesc.Format;
-
-    LOG_IF_FAILED(p_device->CreateShaderResourceView(pSourceSrvTexture.Get(), &sourceSRVDesc,
-                                                     pSourceSrv.ReleaseAndGetAddressOf()),
-                  "Failed to create backbuffer copy SRV.");
-}
-
 HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pThis, DWORD dwStreamIndex,
                                                               IMFMediaType* pInputMediaType,
                                                               IMFAttributes* pEncodingParameters) {
@@ -2313,8 +2202,7 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                     fps_den = fps.second;
 
                     float gameFrameRate =
-                        (static_cast<float>(fps.first) * (static_cast<float>(Config::Manager::motion_blur_samples) + 1) /
-                         static_cast<float>(fps.second));
+                        (static_cast<float>(fps.first) / static_cast<float>(fps.second));
                     
                     LOG(LL_DBG, "Effective frame rate: ", gameFrameRate, " FPS");
                     
@@ -2443,24 +2331,12 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                     LOG(LL_DBG, "Video Export Resolution: ", exportWidth, "x", exportHeight);
                     LOG(LL_DBG, "OpenEXR Export Resolution: ", openExrWidth, "x", openExrHeight);
 
-                    D3D11_TEXTURE2D_DESC motionBlurBufferDesc;
-                    motionBlurBufferDesc.Width = exportWidth;
-                    motionBlurBufferDesc.Height = exportHeight;
-                    motionBlurBufferDesc.MipLevels = 1;
-                    motionBlurBufferDesc.ArraySize = 1;
-                    motionBlurBufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                    motionBlurBufferDesc.SampleDesc.Count = 1;
-                    motionBlurBufferDesc.SampleDesc.Quality = 0;
-                    motionBlurBufferDesc.Usage = D3D11_USAGE_DEFAULT;
-                    motionBlurBufferDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-                    motionBlurBufferDesc.CPUAccessFlags = 0;
-                    motionBlurBufferDesc.MiscFlags = 0;
-
-                    CreateMotionBlurBuffers(::exportContext->p_device, motionBlurBufferDesc);
-
                     REQUIRE(encodingSession->createContext(
                                 Config::Manager::encoder_config, std::wstring(filename.begin(), filename.end()), exportWidth,
-                                exportHeight, "rgba", fps_num, fps_den, numChannels, sampleRate, "s16", blockAlignment,
+                                exportHeight,
+                                (desc.BufferDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                                 desc.BufferDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) ? "bgra" : "rgba",
+                                fps_num, fps_den, numChannels, sampleRate, "s16", blockAlignment,
                                 Config::Manager::export_openexr, openExrWidth, openExrHeight),
                             "Failed to create encoding context.");
                 }
@@ -2982,9 +2858,7 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
         LOG(LL_NFO, "Internal Pass 2 StartBakeProject execution detected; preserving dual-pass state");
     } else {
         const float gameFrameRate =
-            (static_cast<float>(Config::Manager::fps.first) *
-             (static_cast<float>(Config::Manager::motion_blur_samples) + 1) /
-             static_cast<float>(Config::Manager::fps.second));
+            (static_cast<float>(Config::Manager::fps.first) / static_cast<float>(Config::Manager::fps.second));
 
         LOG(LL_NFO, "User-initiated export - effective frame rate: ", gameFrameRate, " FPS");
 
@@ -2997,7 +2871,6 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
 
             dualPassContext->state = DualPassState::PASS1_RUNNING;
             dualPassContext->original_fps = Config::Manager::fps;
-            dualPassContext->original_motion_blur_samples = Config::Manager::motion_blur_samples;
             dualPassContext->saved_video_editor_interface = videoEditorInterface;
             dualPassContext->saved_montage_ptr = montage;
 
@@ -3005,9 +2878,8 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
             g_pass2StartupPending = false;
             g_pass2StartupDelayFrames = 0;
 
-            LOG(LL_NFO, "  PASS 1 will capture audio at 30 FPS, 0 motion blur");
-            LOG(LL_NFO, "  PASS 2 will capture video at ", Config::Manager::fps.first, "/", Config::Manager::fps.second,
-                " FPS, ", Config::Manager::motion_blur_samples, " motion blur samples");
+            LOG(LL_NFO, "  PASS 1 will capture audio at 30 FPS");
+            LOG(LL_NFO, "  PASS 2 will capture one native GPU frame per output frame at ", Config::Manager::fps.first, "/", Config::Manager::fps.second, " FPS");
             LOG(LL_DBG, "  Saved pointers - interface:", videoEditorInterface, " montage:", montage);
         } else {
             LOG(LL_DBG, "Normal frame rate - single-pass export");
@@ -3185,8 +3057,7 @@ void GameHooks::ClothManagerUpdate::Implementation(void* thisPtr, int typeToUpda
 float GameHooks::GetRenderTimeBase::Implementation(int64_t choice) {
     PRE();
     const std::pair<int32_t, int32_t> fps = Config::Manager::fps;
-    const float result = 1000.0f * static_cast<float>(fps.second) /
-                         (static_cast<float>(fps.first) * (static_cast<float>(Config::Manager::motion_blur_samples) + 1));
+    const float result = 1000.0f * static_cast<float>(fps.second) / static_cast<float>(fps.first);
     // float result = 1000.0f / 60.0f;
     LOG(LL_NFO, "Time step: ", result);
     POST();
@@ -3214,11 +3085,9 @@ void CreateNewExportContext() {
         if (dualPassContext->state == DualPassState::PASS1_RUNNING) {
             // Override config for Pass 1: 30 FPS, 0 motion blur
             LOG(LL_NFO, "  PASS 1 DETECTED - Overriding config for audio capture");
-            LOG(LL_NFO, "    Before: fps=", Config::Manager::fps.first, "/", Config::Manager::fps.second, 
-                        " motion_blur=", Config::Manager::motion_blur_samples);
+            LOG(LL_NFO, "    Before: fps=", Config::Manager::fps.first, "/", Config::Manager::fps.second);
             Config::Manager::fps = std::make_pair(30, 1);
-            Config::Manager::motion_blur_samples = 0;
-            LOG(LL_NFO, "    After: fps=30/1 motion_blur=0");
+            LOG(LL_NFO, "    After: fps=30/1");
             
             ::exportContext->is_audio_export_disabled = false;
             LOG(LL_NFO, "  Audio ENABLED for Pass 1");
@@ -3226,11 +3095,8 @@ void CreateNewExportContext() {
                    dualPassContext->state == DualPassState::PASS2_RUNNING) {
             // Restore original user settings for Pass 2 (video capture)
             LOG(LL_NFO, "  PASS 2 DETECTED - Restoring user settings for video capture");
-            LOG(LL_NFO, "    Restoring: fps=", dualPassContext->original_fps.first, "/", 
-                        dualPassContext->original_fps.second, " motion_blur=", 
-                        dualPassContext->original_motion_blur_samples);
+            LOG(LL_NFO, "    Restoring: fps=", dualPassContext->original_fps.first, "/", dualPassContext->original_fps.second);
             Config::Manager::fps = dualPassContext->original_fps;
-            Config::Manager::motion_blur_samples = dualPassContext->original_motion_blur_samples;
             
             ::exportContext->is_audio_export_disabled = false;
             LOG(LL_NFO, "  Audio ENABLED for Pass 2 (replaying buffered audio)");
@@ -3428,175 +3294,6 @@ void* GameHooks::CreateTexture::Implementation(void* rcx, char* name, const uint
     }
 
     return result;
-}
-
-void ever::prepareDeferredContext(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext) {
-    REQUIRE(pDevice->CreateDeferredContext(0, pDContext.GetAddressOf()), "Failed to create deferred context");
-    REQUIRE(pDevice->CreateVertexShader(VSFullScreen::g_main, sizeof(VSFullScreen::g_main), NULL,
-                                        pVsFullScreen.GetAddressOf()),
-            "Failed to create g_VSFullScreen vertex shader");
-    REQUIRE(pDevice->CreatePixelShader(PSAccumulate::g_main, sizeof(PSAccumulate::g_main), NULL,
-                                       pPsAccumulate.GetAddressOf()),
-            "Failed to create pixel shader");
-    REQUIRE(pDevice->CreatePixelShader(PSDivide::g_main, sizeof(PSDivide::g_main), NULL, pPsDivide.GetAddressOf()),
-            "Failed to create pixel shader");
-
-    D3D11_BUFFER_DESC clipBufDesc;
-    clipBufDesc.BindFlags = D3D11_BIND_FLAG::D3D11_BIND_CONSTANT_BUFFER;
-    clipBufDesc.ByteWidth = sizeof(XMFLOAT4);
-    clipBufDesc.CPUAccessFlags = D3D11_CPU_ACCESS_FLAG::D3D11_CPU_ACCESS_WRITE;
-    clipBufDesc.MiscFlags = 0;
-    clipBufDesc.StructureByteStride = 0;
-    clipBufDesc.Usage = D3D11_USAGE::D3D11_USAGE_DYNAMIC;
-
-    REQUIRE(pDevice->CreateBuffer(&clipBufDesc, NULL, pDivideConstantBuffer.GetAddressOf()),
-            "Failed to create constant buffer for pixel shader");
-
-    D3D11_SAMPLER_DESC samplerDesc;
-    samplerDesc.Filter = D3D11_FILTER::D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR;
-    samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_MODE::D3D11_TEXTURE_ADDRESS_WRAP;
-    samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_MODE::D3D11_TEXTURE_ADDRESS_WRAP;
-    samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_MODE::D3D11_TEXTURE_ADDRESS_WRAP;
-    samplerDesc.MipLODBias = 0.0f;
-    samplerDesc.MaxAnisotropy = 1;
-    samplerDesc.ComparisonFunc = D3D11_COMPARISON_FUNC::D3D11_COMPARISON_NEVER;
-    samplerDesc.BorderColor[0] = 1.0f;
-    samplerDesc.BorderColor[1] = 1.0f;
-    samplerDesc.BorderColor[2] = 1.0f;
-    samplerDesc.BorderColor[3] = 1.0f;
-    samplerDesc.MinLOD = -FLT_MAX;
-    samplerDesc.MaxLOD = FLT_MAX;
-
-    REQUIRE(pDevice->CreateSamplerState(&samplerDesc, pPsSampler.GetAddressOf()), "Failed to create sampler state");
-
-    D3D11_RASTERIZER_DESC rasterStateDesc;
-    rasterStateDesc.AntialiasedLineEnable = FALSE;
-    rasterStateDesc.CullMode = D3D11_CULL_FRONT;
-    rasterStateDesc.DepthClipEnable = FALSE;
-    rasterStateDesc.FillMode = D3D11_FILL_MODE::D3D11_FILL_SOLID;
-    rasterStateDesc.MultisampleEnable = FALSE;
-    rasterStateDesc.ScissorEnable = FALSE;
-    REQUIRE(pDevice->CreateRasterizerState(&rasterStateDesc, pRasterState.GetAddressOf()),
-            "Failed to create raster state");
-
-    D3D11_BLEND_DESC blendDesc;
-    blendDesc.AlphaToCoverageEnable = FALSE;
-    blendDesc.IndependentBlendEnable = FALSE;
-    blendDesc.RenderTarget[0].BlendEnable = TRUE;
-    blendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-    blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
-    blendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
-    blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
-    blendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
-    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-
-    REQUIRE(pDevice->CreateBlendState(&blendDesc, pAccBlendState.GetAddressOf()),
-            "Failed to create accumulation blend state");
-}
-
-void ever::drawAdditive(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext,
-                       ComPtr<ID3D11Texture2D> pSource) {
-    D3D11_TEXTURE2D_DESC desc;
-    pSource->GetDesc(&desc);
-
-    LOG_CALL(LL_DBG, pDContext->ClearState());
-    LOG_CALL(LL_DBG, pDContext->IASetIndexBuffer(NULL, DXGI_FORMAT::DXGI_FORMAT_UNKNOWN, 0));
-    LOG_CALL(LL_DBG, pDContext->IASetInputLayout(NULL));
-    LOG_CALL(LL_DBG, pDContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP));
-
-    LOG_CALL(LL_DBG, pDContext->VSSetShader(pVsFullScreen.Get(), NULL, 0));
-    LOG_CALL(LL_DBG, pDContext->PSSetSamplers(0, 1, pPsSampler.GetAddressOf()));
-    LOG_CALL(LL_DBG, pDContext->PSSetShader(pPsAccumulate.Get(), NULL, 0));
-    LOG_CALL(LL_DBG, pDContext->RSSetState(pRasterState.Get()));
-
-    float factors[4] = {0, 0, 0, 0};
-
-    LOG_CALL(LL_DBG, pDContext->OMSetBlendState(pAccBlendState.Get(), factors, 0xFFFFFFFF));
-
-    D3D11_VIEWPORT viewport;
-    viewport.TopLeftX = 0;
-    viewport.TopLeftY = 0;
-    viewport.Width = static_cast<float>(desc.Width);
-    viewport.Height = static_cast<float>(desc.Height);
-    viewport.MinDepth = 0;
-    viewport.MaxDepth = 1;
-    LOG_CALL(LL_DBG, pDContext->RSSetViewports(1, &viewport));
-
-    LOG_CALL(LL_DBG, pDContext->CopyResource(pSourceSrvTexture.Get(), pSource.Get()));
-
-    LOG_CALL(LL_DBG, pDContext->PSSetShaderResources(0, 1, pSourceSrv.GetAddressOf()));
-    LOG_CALL(LL_DBG, pDContext->OMSetRenderTargets(1, pRtvAccBuffer.GetAddressOf(), nullptr));
-    if (::exportContext->acc_count == 0) {
-        float color[4] = {0, 0, 0, 1};
-        LOG_CALL(LL_DBG, pDContext->ClearRenderTargetView(pRtvAccBuffer.Get(), color));
-    }
-
-    LOG_CALL(LL_DBG, pDContext->Draw(4, 0));
-
-    ComPtr<ID3D11CommandList> pCmdList;
-    LOG_CALL(LL_DBG, pDContext->FinishCommandList(FALSE, pCmdList.GetAddressOf()));
-    LOG_CALL(LL_DBG, pContext->ExecuteCommandList(pCmdList.Get(), TRUE));
-
-    ::exportContext->acc_count++;
-}
-
-ComPtr<ID3D11Texture2D> ever::divideBuffer(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext,
-                                          uint32_t k) {
-
-    D3D11_TEXTURE2D_DESC desc;
-    pMotionBlurFinalBuffer->GetDesc(&desc);
-
-    LOG_CALL(LL_DBG, pDContext->ClearState());
-    LOG_CALL(LL_DBG, pDContext->IASetIndexBuffer(NULL, DXGI_FORMAT::DXGI_FORMAT_UNKNOWN, 0));
-    LOG_CALL(LL_DBG, pDContext->IASetInputLayout(NULL));
-    LOG_CALL(LL_DBG, pDContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP));
-
-    LOG_CALL(LL_DBG, pDContext->VSSetShader(pVsFullScreen.Get(), NULL, 0));
-    LOG_CALL(LL_DBG, pDContext->PSSetShader(pPsDivide.Get(), NULL, 0));
-
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    REQUIRE(pDContext->Map(pDivideConstantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped),
-            "Failed to map divide shader constant buffer");
-    ;
-    const auto floats = static_cast<float*>(mapped.pData);
-    floats[0] = static_cast<float>(k);
-    /*floats[0] = 1.0f;*/
-    LOG_CALL(LL_DBG, pDContext->Unmap(pDivideConstantBuffer.Get(), 0));
-
-    LOG_CALL(LL_DBG, pDContext->PSSetConstantBuffers(0, 1, pDivideConstantBuffer.GetAddressOf()));
-    LOG_CALL(LL_DBG, pDContext->PSSetShaderResources(0, 1, pSrvAccBuffer.GetAddressOf()));
-    LOG_CALL(LL_DBG, pDContext->RSSetState(pRasterState.Get()));
-
-    D3D11_VIEWPORT viewport;
-    viewport.TopLeftX = 0;
-    viewport.TopLeftY = 0;
-    viewport.Width = static_cast<float>(desc.Width);
-    viewport.Height = static_cast<float>(desc.Height);
-    viewport.MinDepth = 0;
-    viewport.MaxDepth = 1;
-    LOG_CALL(LL_DBG, pDContext->RSSetViewports(1, &viewport));
-
-    LOG_CALL(LL_DBG, pDContext->OMSetRenderTargets(1, pRtvBlurBuffer.GetAddressOf(), NULL));
-    constexpr float color[4] = {0, 0, 0, 1};
-    LOG_CALL(LL_DBG, pDContext->ClearRenderTargetView(pRtvBlurBuffer.Get(), color));
-
-    LOG_CALL(LL_DBG, pDContext->Draw(4, 0));
-
-    ComPtr<ID3D11CommandList> pCmdList;
-    LOG_CALL(LL_DBG, pDContext->FinishCommandList(FALSE, pCmdList.GetAddressOf()));
-    LOG_CALL(LL_DBG, pContext->ExecuteCommandList(pCmdList.Get(), TRUE));
-
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-
-    ComPtr<ID3D11Texture2D> ret;
-    REQUIRE(pDevice->CreateTexture2D(&desc, NULL, ret.GetAddressOf()),
-            "Failed to create copy of motion blur dest texture");
-    LOG_CALL(LL_DBG, pContext->CopyResource(ret.Get(), pMotionBlurFinalBuffer.Get()));
-
-    return ret;
 }
 
 bool installAbsoluteJumpHook(uint64_t address, uintptr_t hookAddress) {

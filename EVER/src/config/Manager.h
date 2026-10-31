@@ -20,8 +20,6 @@ namespace Config {
         static string output_dir;
         static LogLevel log_level;
         static pair<uint32_t, uint32_t> fps;
-        static uint8_t motion_blur_samples;
-        static float motion_blur_strength;
         static FFmpeg::FFENCODERCONFIG encoder_config;
 
         static void reload();

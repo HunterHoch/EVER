@@ -1,0 +1,55 @@
+name: Native One-Pass Windows Build
+on:
+  push:
+    branches: [feature/native-onepass]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Set up vcpkg binary cache credentials
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - uses: actions/cache@v4
+        with:
+          path: vcpkg_installed
+          key: onepass-vcpkg-x64-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            onepass-vcpkg-x64-
+      - name: Ensure vcpkg history
+        shell: pwsh
+        run: |
+          $shallow = git -C vcpkg rev-parse --is-shallow-repository
+          if ($shallow -eq 'true') { git -C vcpkg fetch --unshallow }
+      - name: Compile actual EVER fork (Release x64)
+        shell: cmd
+        env:
+          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+          VCPKG_OVERLAY_TRIPLETS: triplets
+        run: .\build.bat
+      - name: Validate full installer layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          if(!(Test-Path 'x64\Release\EVER.asi')) {throw 'EVER.asi missing'}
+          if(!(Test-Path 'x64\Release\EVER\dlls')) {throw 'EVER runtime DLLs missing'}
+          New-Item -Type Directory -Force -Path dist | Out-Null
+          Copy-Item 'x64\Release\EVER.asi' 'dist\EVER.asi'
+          Copy-Item 'x64\Release\EVER' 'dist\EVER' -Recurse
+          Get-ChildItem dist -Recurse -File | Where-Object Extension -in '.pdb','.map' | Remove-Item -Force
+          $size=(Get-Item 'dist\EVER.asi').Length
+          Write-Host "Built EVER.asi size: $size"
+          if($size -lt 100000) {throw 'Unexpectedly small EVER.asi'}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EVER-Native-OnePass-ReShade-Release-x64
+          path: dist/*
+          if-no-files-found: error

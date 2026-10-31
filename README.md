@@ -1,3 +1,23 @@
+# EVER Native One-Pass (HunterHoch experimental fork)
+
+**Actual upstream:** [MiffedLyric559/EVER](https://github.com/MiffedLyric559/EVER)
+
+**Branch:** `feature/native-onepass` for direct ReShade-aware DX11 capture with
+**exactly one native Rockstar Editor frame per encoded frame**. All
+`motion_blur_samples` logic, accumulation and divide HLSL shaders, double
+`Present`, and sampling-era ripple/cloth time gating are removed.
+
+The original EVER FFmpeg/LibAV codec and audio pipeline are preserved, as
+are its render target recognition and native Rockstar Editor export hooks.
+No BetterVideoExport code is used.
+
+**Status:** Windows build in progress. The exported visual result, post-ReShade
+pixel correctness, native motion blur, and exact internal render resolution
+are not yet validated on FiveM Legacy 3788. This branch does not patch the
+GTA camera's native motion-blur gate. See [ONEPASS.md](ONEPASS.md).
+
+---
+
 # EVER - Extended Video Export Revived
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -74,7 +94,7 @@ The project focuses on the following core objectives:
 
 Installing **EVER** is just as easy as before:
 
-**Required:** You need to have Voukoder installed in order for the plugin to work, you can grab the installation file from: [here](https://web.archive.org/web/20241216004346/https://github.com/Vouk/voukoder/releases/tag/13.4.1).
+**This fork's encoder:** EVER's own FFmpeg libraries are included in the built distribution. Voukoder is not used by the one-pass encoder.
 
 #### For GTA V:
 
@@ -105,8 +125,6 @@ Inside the `.ini` file or in the `Home` menu of Reshade you can adjust various s
 - `output_folder`: The folder where the exported videos will be saved (default location is in the Videos folder).
 - `log_level`: The level of logging that should be displayed in the console.
 - `fps`: The frame rate of the exported video.
-- `motion_blur_samples`: How many samples the plugin should take to apply the motion blur effect.
-- `motion_blur_strength`: The strength of the motion blur effect.
 - `export_openexr`: Enable or disable the export of the video in the OpenEXR format.
 - `disable_watermark`: Enable or disable the Rockstar watermark.
 
@@ -153,8 +171,7 @@ Once the Rockstar Editor is done, the second pass will automatically start and y
 
 3. Download the ScriptHookV SDK from [here](http://www.dev-c.com/gtav/scripthookv/) and unzip into: `ScriptHookV` inside the main repository folder.
 
-4. Download the Voukoder from [here](https://web.archive.org/web/20241216004346/https://github.com/Vouk/voukoder) (Wayback Machine) and unzip the archive and copy the contents of the `Voukoder` into a folder named: `voukoder` inside the main repository folder.
-
+4. Build with the project's existing CMake/vcpkg dependencies; Voukoder is not part of this fork's encoder.\n
 5. Run the build script:
    ```bash
    build.bat

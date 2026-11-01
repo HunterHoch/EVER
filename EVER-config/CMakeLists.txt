@@ -91,15 +91,8 @@ if(MSVC)
     )
 endif()
 
-add_custom_command_if(
-        TARGET ${PROJECT_NAME}
-        POST_BUILD
-        COMMANDS
-        COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\EVER-config.exe" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\EncoderConfig.exe"
-        COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\EVER-config.pdb" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\EncoderConfig.pdb"
-        COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\EVER-config.exe" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\EncoderConfig.exe"
-        COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\EVER-config.pdb" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\EncoderConfig.pdb"
-)
+# Stage EncoderConfig.exe after both parallel build targets finish.
+# Removing it from the target's POST_BUILD avoids a race with EVER's deploy folder.
 
 ### Imports 
 

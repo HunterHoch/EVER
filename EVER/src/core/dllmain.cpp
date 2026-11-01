@@ -95,20 +95,6 @@ static void draw_eve_settings(reshade::api::effect_runtime* runtime) {
         ImGui::SetTooltip("Frames per second for video export (e.g., 30, 60, 120)");
 
     ImGui::Spacing();
-    int mb_samples = static_cast<int>(Config::Manager::motion_blur_samples);
-    if (ImGui::SliderInt("Motion Blur Samples", &mb_samples, 0, 255)) {
-        Config::Manager::motion_blur_samples = static_cast<uint8_t>(mb_samples);
-        Config::Manager::save();
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Number of motion blur samples (0 = disabled, higher = smoother but slower)");
-
-    if (ImGui::SliderFloat("Motion Blur Strength", &Config::Manager::motion_blur_strength, 0.0f, 1.0f, "%.2f")) {
-        Config::Manager::save();
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Motion blur strength (0.0 = none, 1.0 = maximum)");
-
     ImGui::Spacing();
     if (ImGui::Checkbox("Export OpenEXR", &Config::Manager::export_openexr)) {
         Config::Manager::save();

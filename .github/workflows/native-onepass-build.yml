@@ -2,52 +2,106 @@ name: Native One-Pass Windows Build
 on:
   push:
     branches: [feature/native-onepass]
+    paths:
+      - 'EVER/src/**'
+      - 'EVER-config/**'
+      - 'EVER/CMakeLists.txt'
+      - 'CMakeLists.txt'
+      - 'build.bat'
+      - 'vcpkg.json'
+      - 'triplets/**'
+      - '.gitmodules'
+      - '.github/workflows/native-onepass-build.yml'
   workflow_dispatch:
+
+concurrency:
+  group: ever-native-onepass-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+  VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/triplets
+
 jobs:
-  build:
+  deps:
+    name: Cache complete CMake/vcpkg dependency tree
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
-      - name: Set up vcpkg binary cache credentials
-        uses: actions/github-script@v7
+      - uses: actions/github-script@v7
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
       - uses: actions/cache@v4
+        id: vcpkg
         with:
-          path: vcpkg_installed
-          key: onepass-vcpkg-x64-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            onepass-vcpkg-x64-
-      - name: Ensure vcpkg history
-        shell: pwsh
-        run: |
-          $shallow = git -C vcpkg rev-parse --is-shallow-repository
-          if ($shallow -eq 'true') { git -C vcpkg fetch --unshallow }
-      - name: Compile actual EVER fork (Release x64)
-        shell: cmd
-        env:
-          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-          VCPKG_OVERLAY_TRIPLETS: triplets
-        run: .\build.bat
-      - name: Validate full installer layout
+          path: build/vcpkg_installed
+          key: ever-vcpkg-windows-v2-${{ hashFiles('vcpkg.json', 'triplets/**', '.gitmodules') }}
+      - name: Configure and install dependencies once
+        if: steps.vcpkg.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          if(!(Test-Path 'x64\Release\EVER.asi')) {throw 'EVER.asi missing'}
-          if(!(Test-Path 'x64\Release\EVER\dlls')) {throw 'EVER runtime DLLs missing'}
-          New-Item -Type Directory -Force -Path dist | Out-Null
-          Copy-Item 'x64\Release\EVER.asi' 'dist\EVER.asi'
-          Copy-Item 'x64\Release\EVER' 'dist\EVER' -Recurse
-          Get-ChildItem dist -Recurse -File | Where-Object Extension -in '.pdb','.map' | Remove-Item -Force
-          $size=(Get-Item 'dist\EVER.asi').Length
-          Write-Host "Built EVER.asi size: $size"
-          if($size -lt 100000) {throw 'Unexpectedly small EVER.asi'}
+          & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T v142 -DCMAKE_TOOLCHAIN_FILE="vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-release
+          if ($LASTEXITCODE -ne 0) { throw 'CMake dependency configuration failed' }
+      - name: Verify cached FFmpeg
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'build/vcpkg_installed/x64-windows-release/lib/avcodec.lib')) {
+            throw 'Expected FFmpeg dependency missing from vcpkg tree'
+          }
+
+  build:
+    name: Build EVER and stage installation ZIP
+    needs: deps
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - uses: actions/cache/restore@v4
+        with:
+          path: build/vcpkg_installed
+          key: ever-vcpkg-windows-v2-${{ hashFiles('vcpkg.json', 'triplets/**', '.gitmodules') }}
+          fail-on-cache-miss: true
+      - name: Configure and compile using cached dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T v142 -DCMAKE_TOOLCHAIN_FILE="vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-release
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed' }
+          cmake --build build --config Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw 'C++ compilation failed' }
+      - name: Assemble complete EVER distribution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          if (!(Test-Path 'x64/Release/EVER.asi')) { throw 'EVER.asi missing' }
+          if (!(Test-Path 'x64/Release/EVER-config.exe')) { throw 'EncoderConfig.exe source missing' }
+          if (!(Test-Path 'x64/Release/EVER/dlls')) { throw 'FFmpeg DLLs missing' }
+          New-Item -ItemType Directory -Path 'dist/EVER' -Force | Out-Null
+          Copy-Item 'x64/Release/EVER.asi' 'dist/EVER.asi'
+          Copy-Item 'x64/Release/EVER/*' 'dist/EVER' -Recurse -Force
+          Copy-Item 'x64/Release/EVER-config.exe' 'dist/EVER/EncoderConfig.exe'
+          Get-ChildItem dist -Recurse -File | Where-Object { $_.Extension -in '.pdb','.map' } | Remove-Item -Force
+          if ((Get-Item 'dist/EVER.asi').Length -lt 100000) { throw 'Compiled ASI is unexpectedly small' }
+          $dlls = @(Get-ChildItem 'dist/EVER/dlls' -Filter '*.dll')
+          if ($dlls.Count -lt 5) { throw "Expected FFmpeg DLLs; found $($dlls.Count)" }
+          Write-Host "READY: EVER.asi plus $($dlls.Count) runtime DLLs"
       - uses: actions/upload-artifact@v4
         with:
           name: EVER-Native-OnePass-ReShade-Release-x64

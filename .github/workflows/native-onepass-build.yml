@@ -36,6 +36,17 @@ jobs:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Fetch full vcpkg history for pinned registry baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $shallow = (git -C vcpkg rev-parse --is-shallow-repository).Trim()
+          if ($shallow -eq 'true') {
+            git -C vcpkg fetch --unshallow origin
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to fetch pinned vcpkg baseline history' }
+          }
+          git -C vcpkg cat-file -e a42af01b72c28a8e1d7b48107b33e4f286a55ef6^{commit}
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned vcpkg baseline commit is unavailable' }
       - uses: actions/cache@v4
         id: vcpkg
         with:

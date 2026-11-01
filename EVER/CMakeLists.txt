@@ -243,31 +243,18 @@ add_custom_command_if(
 ################################################################################
 # Post build events
 ################################################################################
-add_custom_command_if(
-        TARGET ${PROJECT_NAME}
-        POST_BUILD
-        COMMANDS
-        COMMAND $<CONFIG:Debug> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:Debug> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:MinSizeRel> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER>"
-        COMMAND $<CONFIG:MinSizeRel> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:Release> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER>"
-        COMMAND $<CONFIG:Release> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:Release> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:RelWithDebInfo> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:RelWithDebInfo> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:RelWithDebInfo> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-)
-
-add_custom_command(
-        TARGET ${PROJECT_NAME}
-        POST_BUILD
+# Stage the mod assets and required runtime libraries deterministically. The
+# old del/xcopy/move sequence raced the separate EVER-config target.
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>"
-        # Copy runtime DLLs from the active vcpkg triplet output (e.g. x64-windows-release).
-        COMMAND xcopy /y "$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>"
-        COMMENT "Copy FFmpeg and codec runtime DLLs"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/deploy"
+                "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin>"
+                "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>"
+        COMMENT "Stage EVER data and FFmpeg runtime DLLs"
+        VERBATIM
 )
 
 ################################################################################
